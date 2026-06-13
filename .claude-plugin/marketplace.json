@@ -11,8 +11,7 @@
       "category": "productivity",
       "source": {
         "source": "url",
-        "url": "https://github.com/kalfian/claude-status.git",
-        "sha": "3040eebd4516020503e229fad2f52753eeb0b743"
+        "url": "https://github.com/kalfian/claude-status.git"
       },
       "homepage": "https://github.com/kalfian/claude-status"
     }
