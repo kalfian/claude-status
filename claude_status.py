@@ -135,12 +135,11 @@ def format_reset_label(resets_at_iso) -> str:
         # Python 3.7+ fromisoformat doesn't handle Z suffix
         iso = resets_at_iso.replace('Z', '+00:00')
         reset_dt = datetime.fromisoformat(iso)
-        local_now = datetime.now(tz=reset_dt.tzinfo if reset_dt.tzinfo else timezone.utc)
-        local_now_date = local_now.date()
-        reset_local = reset_dt
-        reset_date = reset_local.date()
+        # Convert to device local timezone
+        reset_local = reset_dt.astimezone()
+        local_now = datetime.now().astimezone()
         time_str = reset_local.strftime('%H:%M')
-        if reset_date == local_now_date:
+        if reset_local.date() == local_now.date():
             return f'resets today {time_str}'
         else:
             month_day = reset_local.strftime('%b %-d')
@@ -163,13 +162,13 @@ def format_reset_compact(resets_at_iso) -> str:
     try:
         iso = resets_at_iso.replace('Z', '+00:00')
         reset_dt = datetime.fromisoformat(iso)
-        local_now = datetime.now(tz=reset_dt.tzinfo if reset_dt.tzinfo else timezone.utc)
-        local_now_date = local_now.date()
-        reset_date = reset_dt.date()
-        if reset_date == local_now_date:
-            return f'↺ {reset_dt.strftime("%H:%M")}'
+        # Convert to device local timezone
+        reset_local = reset_dt.astimezone()
+        local_now = datetime.now().astimezone()
+        if reset_local.date() == local_now.date():
+            return f'↺ {reset_local.strftime("%H:%M")}'
         else:
-            return f'↺ {reset_dt.strftime("%b %-d")}'
+            return f'↺ {reset_local.strftime("%b %-d")}'
     except Exception:
         return ''
 
