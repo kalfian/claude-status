@@ -1,6 +1,6 @@
 {
   "name": "claude-status",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Real-time statusline showing 5h session %, weekly %, context window, and reset times. Zero tokens consumed.",
   "author": {
     "name": "kalfian",
