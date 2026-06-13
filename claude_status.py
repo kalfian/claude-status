@@ -54,6 +54,10 @@ DEFAULT_CONFIG = {
 INSTALL_PATH = Path.home() / '.claude' / 'scripts' / 'claude_status.py'
 SETTINGS_PATH = Path.home() / '.claude' / 'settings.json'
 
+# Disk cache for API responses — avoids hammering API on frequent statusLine refreshes
+_CACHE_PATH = Path('/tmp/claude-status-cache.json')
+_CACHE_TTL_SECONDS = 60
+
 _UUID4_RE = re.compile(
     r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
     re.IGNORECASE,
@@ -100,6 +104,43 @@ def fetch_usage_api(access_token: str) -> Optional[dict]:
             return json.loads(resp.read().decode())
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Module: Disk cache (avoids repeated API calls during frequent statusLine refreshes)
+# ---------------------------------------------------------------------------
+import time as _time_module
+
+
+def _load_cache() -> Optional[dict]:
+    """Return cached API data if still fresh (within TTL), else None."""
+    try:
+        raw = _CACHE_PATH.read_text()
+        entry = json.loads(raw)
+        age = _time_module.time() - entry.get('fetched_at', 0)
+        if age < _CACHE_TTL_SECONDS:
+            return entry.get('data')
+    except Exception:
+        pass
+    return None
+
+
+def _save_cache(data: dict) -> None:
+    try:
+        _CACHE_PATH.write_text(json.dumps({'fetched_at': _time_module.time(), 'data': data}))
+    except Exception:
+        pass
+
+
+def fetch_usage_cached(access_token: str) -> Optional[dict]:
+    """Return API data from disk cache if fresh, else fetch + cache."""
+    cached = _load_cache()
+    if cached is not None:
+        return cached
+    data = fetch_usage_api(access_token)
+    if data is not None:
+        _save_cache(data)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +209,7 @@ def format_reset_compact(resets_at_iso) -> str:
         if reset_local.date() == local_now.date():
             return f'↺ {reset_local.strftime("%H:%M")}'
         else:
-            return f'↺ {reset_local.strftime("%b %-d")}'
+            return f'↺ {reset_local.strftime("%b %-d %H:%M")}'
     except Exception:
         return ''
 
@@ -594,6 +635,10 @@ def install():
     if not existing_sl or existing_sl.get('command') != hook_cmd:
         settings['statusLine'] = {'type': 'command', 'command': hook_cmd}
 
+    # Set refresh interval: 10s refresh + 60s API cache = nearly realtime without spam
+    if 'refreshInterval' not in settings:
+        settings['refreshInterval'] = 10000
+
     new_content = json.dumps(settings, indent=2)
     # Validate
     try:
@@ -741,9 +786,10 @@ def main():
         if token_info:
             _log(f'  keychain    : OK  subscription={token_info.get("subscription_type")}  expires_at={token_info.get("expires_at")}')
             t1 = _time.monotonic()
-            api_data = fetch_usage_api(token_info['access_token'])
+            cache_hit = _load_cache() is not None
+            api_data = fetch_usage_cached(token_info['access_token'])
             elapsed_ms = int((_time.monotonic() - t1) * 1000)
-            _log(f'  api fetch   : {"OK" if api_data else "FAIL"}  ({elapsed_ms}ms)')
+            _log(f'  api fetch   : {"OK" if api_data else "FAIL"}  ({elapsed_ms}ms)  cache={"HIT" if cache_hit else "MISS"}')
             if api_data:
                 _log(f'  raw api     : {json.dumps(api_data)}')
                 five_hour, seven_day = parse_api_result(api_data)
