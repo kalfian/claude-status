@@ -48,10 +48,21 @@ jobs:
             echo "IS_PRERELEASE=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Build plugin zip (no wrapper directory)
+        run: |
+          zip -r claude-status.zip . \
+            --exclude "*.git*" \
+            --exclude ".pytest_cache/*" \
+            --exclude "__pycache__/*" \
+            --exclude "tests/__pycache__/*" \
+            --exclude ".venv/*"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.version.outputs.VERSION }}
           prerelease: ${{ steps.prerelease.outputs.IS_PRERELEASE }}
           generate_release_notes: true
-          files: claude_status.py
+          files: |
+            claude_status.py
+            claude-status.zip

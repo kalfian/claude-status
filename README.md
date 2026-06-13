@@ -37,11 +37,20 @@ On-demand via slash command:
 
 ### Option B — Current session only (no marketplace needed)
 
+Download the release asset and point to it directly:
+
 ```bash
-claude --plugin-url https://github.com/kalfian/claude-status/archive/main.zip
+curl -L https://github.com/kalfian/claude-status/releases/latest/download/claude-status.zip -o /tmp/claude-status.zip
+claude --plugin-url /tmp/claude-status.zip
 ```
 
-Useful for testing before committing to a full install.
+Or if you've cloned the repo locally:
+
+```bash
+claude --plugin-dir /path/to/claude-status
+```
+
+> **Note:** `--plugin-url` does **not** work with GitHub archive URLs (`/archive/main.zip`) because those zips wrap everything inside a `reponame-branch/` subdirectory that Claude Code cannot strip. Use a release asset zip or `--plugin-dir` instead.
 
 ### Option C — Manual install (no plugin system)
 
