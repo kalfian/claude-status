@@ -150,6 +150,31 @@ def format_reset_label(resets_at_iso) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Module: Compact reset label (color mode only)
+# ---------------------------------------------------------------------------
+def format_reset_compact(resets_at_iso) -> str:
+    """Convert ISO 8601 UTC to compact local time label for color mode.
+    Same day → '↺ HH:MM'
+    Different day → '↺ Jun 16'
+    Empty/None → ''
+    """
+    if not resets_at_iso:
+        return ''
+    try:
+        iso = resets_at_iso.replace('Z', '+00:00')
+        reset_dt = datetime.fromisoformat(iso)
+        local_now = datetime.now(tz=reset_dt.tzinfo if reset_dt.tzinfo else timezone.utc)
+        local_now_date = local_now.date()
+        reset_date = reset_dt.date()
+        if reset_date == local_now_date:
+            return f'↺ {reset_dt.strftime("%H:%M")}'
+        else:
+            return f'↺ {reset_dt.strftime("%b %-d")}'
+    except Exception:
+        return ''
+
+
+# ---------------------------------------------------------------------------
 # Module: Color selector
 # ---------------------------------------------------------------------------
 def color_for(pct: float) -> str:
@@ -190,13 +215,12 @@ def render_segment(
         bold = ANSI['bold']
 
         filled = round(pct / 100.0 * line_len)
-        bar_chars = '─' * filled + '·' * (line_len - filled)
-        bar = f'{col}{bar_chars}{reset}'
+        bar = f'{col}{"█" * filled}{dim}{"░" * (line_len - filled)}{reset}'
         pct_str = f'{col}{bold}{int(pct)}%{reset}'
         label_str = f'{dim}{label}{reset}'
         note_str = f'{dim}{note}{reset}' if note else ''
         if warn:
-            note_str = f'{dim}{note} ⚠{reset}' if note else f'{dim}⚠{reset}'
+            note_str = f'{col}{bold}⚠ {reset}{dim}{note}{reset}' if note else f'{col}{bold}⚠{reset}'
     else:
         filled = round(pct / 100.0 * line_len)
         bar_chars = '-' * filled + '.' * (line_len - filled)
@@ -344,15 +368,12 @@ def render_status_line(
     """Full line adaptive layout."""
 
     def _note(result: dict) -> str:
-        base_note = format_reset_label(result.get('resets_at', ''))
+        base_note = format_reset_compact(result.get('resets_at', '')) if use_color else format_reset_label(result.get('resets_at', ''))
         if is_fallback or result.get('is_estimate'):
-            # Add est. suffix and ~ prefix to times
-            if base_note:
-                # replace 'resets' with 'resets ~' to prefix time
+            if not use_color and base_note:
                 base_note = base_note.replace('resets today ', 'resets ~today ')
                 base_note = base_note.replace('resets ', '~resets ')
-                return base_note + ' est.'
-            return 'est.'
+            return (base_note + ' est.') if base_note else 'est.'
         return base_note
 
     session_seg = render_segment(
@@ -364,7 +385,7 @@ def render_status_line(
         line_len=10, use_color=use_color,
     )
 
-    sep = '   '
+    sep = f'  {ANSI["dim"]}│{ANSI["reset"]}  ' if use_color else '  │  '
 
     # Right info (model + subscription)
     right_parts = []
@@ -373,11 +394,14 @@ def render_status_line(
     if subscription:
         right_parts.append(subscription.capitalize())
     right_info = ' · '.join(right_parts) if right_parts else ''
+    if use_color and right_info:
+        right_info = f'{ANSI["dim"]}◆{ANSI["reset"]} ' + right_info
 
     if term_width >= 110 and ctx_pct is not None:
-        ctx_label = f'Context ({ctx_detail})' if ctx_detail else 'Context'
+        ctx_label = 'Context'
+        ctx_note = ctx_detail if use_color else ''
         ctx_seg = render_segment(
-            ctx_label, ctx_pct, '', line_len=10, use_color=use_color,
+            ctx_label, ctx_pct, ctx_note, line_len=10, use_color=use_color,
         )
         line = sep.join([session_seg, weekly_seg, ctx_seg])
         if right_info:
