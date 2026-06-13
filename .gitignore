@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# macOS
+.DS_Store
+
+# Planning (local only)
+PLAN.md
+
+# Claude Code local config
+.claude/
+
+# Editor
+.vscode/
+.idea/
+
+# Secrets / env
+.env
+*.env
+credentials.json
