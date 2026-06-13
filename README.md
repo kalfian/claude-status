@@ -24,7 +24,7 @@ Register the marketplace once, then install:
 
 ```
 /plugin marketplace add kalfian/claude-status
-/plugin install claude-status@claude-status
+/plugin install claude-status@kalfian-claude-status
 ```
 
 The Stop hook registers automatically — statusline appears below every response.
