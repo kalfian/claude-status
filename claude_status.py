@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 from urllib.request import Request, urlopen
-from urllib.error import URLError
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,6 +52,9 @@ DEFAULT_CONFIG = {
 
 INSTALL_PATH = Path.home() / '.claude' / 'scripts' / 'claude_status.py'
 SETTINGS_PATH = Path.home() / '.claude' / 'settings.json'
+_PLUGIN_MARKER = Path.home() / '.claude' / 'claude-status-plugin-root'
+CLEANUP_SCRIPT_PATH = Path.home() / '.claude' / 'scripts' / 'claude-status-cleanup.py'
+PLUGIN_KEY = 'claude-status@kalfian-claude-code'
 
 # Disk cache for API responses — avoids hammering API on frequent statusLine refreshes
 _CACHE_PATH = Path('/tmp/claude-status-cache.json')
@@ -614,7 +616,7 @@ def install():
         except Exception:
             pass
 
-    hook_cmd = f'python3 {INSTALL_PATH}'
+    hook_cmd = f'python3 "{INSTALL_PATH}"'
     hooks = settings.setdefault('hooks', {})
     stop_hooks = hooks.setdefault('Stop', [])
 
@@ -647,7 +649,9 @@ def install():
         print(f'Error: generated invalid JSON — {e}', file=sys.stderr)
         return
 
-    SETTINGS_PATH.write_text(new_content)
+    tmp = SETTINGS_PATH.with_suffix('.json.tmp')
+    tmp.write_text(new_content)
+    tmp.replace(SETTINGS_PATH)
     print(f'Installed claude_status hook → {INSTALL_PATH}')
     print(f'Updated settings.json with Stop hook and statusLine widget.')
 
@@ -664,7 +668,7 @@ def uninstall():
         print(f'Error reading settings.json: {e}', file=sys.stderr)
         return
 
-    hook_cmd = f'python3 {INSTALL_PATH}'
+    hook_cmd = f'python3 "{INSTALL_PATH}"'
     hooks = settings.get('hooks', {})
     stop_hooks = hooks.get('Stop', [])
     new_stop = [
@@ -683,8 +687,228 @@ def uninstall():
     if settings.get('statusLine', {}).get('command') == hook_cmd:
         del settings['statusLine']
 
-    SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+    tmp = SETTINGS_PATH.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(settings, indent=2))
+    tmp.replace(SETTINGS_PATH)
     print('Removed claude_status Stop hook and statusLine from settings.json.')
+
+
+# ---------------------------------------------------------------------------
+# Module: Plugin lifecycle (called by hooks.json SessionStart / skill)
+# ---------------------------------------------------------------------------
+
+# Cleanup script written to ~/.claude/scripts/ on activate; auto-runs on SessionStart
+# to remove statusLine when plugin is uninstalled/disabled.
+_CLEANUP_SCRIPT = '''\
+#!/usr/bin/env python3
+"""claude-status auto-uninstall hook. Runs on SessionStart; removes statusLine when plugin disabled."""
+from __future__ import annotations
+import json
+from pathlib import Path
+
+SETTINGS = Path.home() / '.claude' / 'settings.json'
+MARKER = Path.home() / '.claude' / 'claude-status-plugin-root'
+PLUGIN_KEY = 'claude-status@kalfian-claude-code'
+THIS_SCRIPT = str(Path.home() / '.claude' / 'scripts' / 'claude-status-cleanup.py')
+
+
+def main() -> None:
+    # Only act if plugin_activate() has run at least once (marker exists)
+    if not MARKER.exists():
+        return
+
+    try:
+        settings = json.loads(SETTINGS.read_text())
+    except Exception:
+        return
+
+    # Guard: only clean up when enabledPlugins is explicitly present and plugin is not enabled.
+    # If the key is absent entirely, settings.json predates the plugin system — don't touch.
+    enabled_plugins = settings.get('enabledPlugins')
+    if enabled_plugins is None:
+        return
+    if enabled_plugins.get(PLUGIN_KEY, False):
+        return  # plugin is enabled — nothing to do
+
+    changed = False
+
+    # Remove statusLine only if it matches exactly what plugin_activate() set
+    marker_script = MARKER.read_text().strip()
+    expected_sl_cmd = f'python3 "{marker_script}"'
+    if settings.get('statusLine', {}).get('command') == expected_sl_cmd:
+        del settings['statusLine']
+        changed = True
+
+    # Remove ourselves from hooks.SessionStart
+    hooks = settings.get('hooks', {})
+    ss = hooks.get('SessionStart', [])
+    new_ss = [
+        h for h in ss
+        if not any(
+            THIS_SCRIPT in inner.get('command', '')
+            for inner in h.get('hooks', [])
+            if isinstance(inner, dict)
+        )
+    ]
+    if len(new_ss) != len(ss):
+        if new_ss:
+            hooks['SessionStart'] = new_ss
+        else:
+            hooks.pop('SessionStart', None)
+        changed = True
+
+    if changed:
+        tmp = SETTINGS.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(settings, indent=2))
+        tmp.replace(SETTINGS)
+
+    MARKER.unlink()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        pass
+'''
+
+
+def _write_cleanup_script() -> None:
+    CLEANUP_SCRIPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CLEANUP_SCRIPT_PATH.write_text(_CLEANUP_SCRIPT)
+    CLEANUP_SCRIPT_PATH.chmod(0o755)
+
+
+def plugin_activate() -> None:
+    """Configure statusLine in settings.json and install cleanup hook. Called by SessionStart hook.
+
+    Fast-path via marker file — settings.json only updated when plugin root changes.
+    Always exits silently; must never block a session.
+    """
+    try:
+        plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
+        if not plugin_root:
+            return
+
+        script_path = str(Path(plugin_root) / 'claude_status.py')
+
+        # Fast path: marker matches current plugin root → already fully configured
+        if _PLUGIN_MARKER.exists() and _PLUGIN_MARKER.read_text().strip() == script_path:
+            return
+
+        status_cmd = f'python3 "{script_path}"'
+        cleanup_cmd = f'python3 "{CLEANUP_SCRIPT_PATH}"'
+
+        settings: dict = {}
+        if SETTINGS_PATH.exists():
+            try:
+                settings = json.loads(SETTINGS_PATH.read_text())
+            except Exception:
+                return
+
+        changed = False
+
+        # Set statusLine
+        if settings.get('statusLine', {}).get('command') != status_cmd:
+            settings['statusLine'] = {'type': 'command', 'command': status_cmd}
+            changed = True
+
+        # Set refreshInterval
+        if 'refreshInterval' not in settings:
+            settings['refreshInterval'] = 10000
+            changed = True
+
+        # Register cleanup hook in settings.json SessionStart (persistent, survives uninstall)
+        hooks = settings.setdefault('hooks', {})
+        ss_hooks = hooks.setdefault('SessionStart', [])
+        already = any(
+            isinstance(h, dict) and any(
+                cleanup_cmd in inner.get('command', '')
+                for inner in h.get('hooks', [])
+                if isinstance(inner, dict)
+            )
+            for h in ss_hooks
+        )
+        if not already:
+            ss_hooks.append({'hooks': [{'type': 'command', 'command': cleanup_cmd, 'timeout': 3}]})
+            changed = True
+
+        if changed:
+            new_content = json.dumps(settings, indent=2)
+            json.loads(new_content)  # validate before writing
+            tmp = SETTINGS_PATH.with_suffix('.json.tmp')
+            tmp.write_text(new_content)
+            tmp.replace(SETTINGS_PATH)
+
+        _write_cleanup_script()
+        _PLUGIN_MARKER.write_text(script_path)
+    except Exception:
+        pass  # Never fail — runs at session start
+
+
+def plugin_deactivate() -> None:
+    """Remove statusLine + cleanup hook from settings.json. Called via skill or manual cleanup."""
+    try:
+        plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', '')
+        if plugin_root:
+            script_path = str(Path(plugin_root) / 'claude_status.py')
+        elif _PLUGIN_MARKER.exists():
+            script_path = _PLUGIN_MARKER.read_text().strip()
+        else:
+            print('claude-status: not configured as plugin (no marker file found).')
+            return
+
+        status_cmd = f'python3 "{script_path}"'
+        cleanup_cmd = f'python3 "{CLEANUP_SCRIPT_PATH}"'
+
+        if not SETTINGS_PATH.exists():
+            print('settings.json not found, nothing to clean up.')
+            return
+
+        try:
+            settings = json.loads(SETTINGS_PATH.read_text())
+        except Exception as e:
+            print(f'Error reading settings.json: {e}', file=sys.stderr)
+            return
+
+        changed = False
+
+        if settings.get('statusLine', {}).get('command') == status_cmd:
+            del settings['statusLine']
+            changed = True
+            print('claude-status: removed statusLine from settings.json.')
+        else:
+            print('claude-status: statusLine not found (already clean).')
+
+        # Remove cleanup hook from settings.json SessionStart
+        hooks = settings.get('hooks', {})
+        ss = hooks.get('SessionStart', [])
+        new_ss = [
+            h for h in ss
+            if not any(
+                cleanup_cmd in inner.get('command', '')
+                for inner in h.get('hooks', [])
+                if isinstance(inner, dict)
+            )
+        ]
+        if len(new_ss) != len(ss):
+            if new_ss:
+                hooks['SessionStart'] = new_ss
+            else:
+                hooks.pop('SessionStart', None)
+            changed = True
+            print('claude-status: removed cleanup hook from settings.json.')
+
+        if changed:
+            tmp = SETTINGS_PATH.with_suffix('.json.tmp')
+            tmp.write_text(json.dumps(settings, indent=2))
+            tmp.replace(SETTINGS_PATH)
+
+        if _PLUGIN_MARKER.exists():
+            _PLUGIN_MARKER.unlink()
+            print('claude-status: marker file removed.')
+    except Exception as e:
+        print(f'claude-status deactivate error: {e}', file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +922,8 @@ def main():
     parser.add_argument('--set-plan', choices=['pro', 'max_100', 'custom'])
     parser.add_argument('--install', action='store_true')
     parser.add_argument('--uninstall', action='store_true')
+    parser.add_argument('--plugin-activate', action='store_true', help='Auto-configure statusLine in settings.json (called by UserPromptSubmit hook)')
+    parser.add_argument('--plugin-deactivate', action='store_true', help='Remove plugin statusLine from settings.json (call before uninstalling)')
     parser.add_argument('--dev', action='store_true', help='Developer mode: verbose diagnostics to stderr')
     parser.add_argument('--debug', action='store_true', help='Write debug log to temp file (useful when running as hook)')
     args = parser.parse_args()
@@ -708,6 +934,14 @@ def main():
 
     if args.uninstall:
         uninstall()
+        sys.exit(0)
+
+    if args.plugin_activate:
+        plugin_activate()
+        sys.exit(0)
+
+    if args.plugin_deactivate:
+        plugin_deactivate()
         sys.exit(0)
 
     if args.set_plan:
