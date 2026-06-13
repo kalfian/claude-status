@@ -1,17 +1,9 @@
 {
   "name": "claude-status",
-  "displayName": "Claude Status",
   "version": "0.1.0",
   "description": "Real-time statusline showing 5h session %, weekly %, context window, and reset times. Zero tokens consumed.",
   "author": {
     "name": "kalfian",
-    "url": "https://github.com/kalfian"
-  },
-  "homepage": "https://github.com/kalfian/claude-status",
-  "repository": "https://github.com/kalfian/claude-status",
-  "license": "MIT",
-  "keywords": ["usage", "status", "tokens", "context", "quota"],
-  "defaultEnabled": true,
-  "hooks": "./hooks/hooks.json",
-  "commands": ["./skills/status/SKILL.md"]
+    "email": "kukuhalf@gmail.com"
+  }
 }
