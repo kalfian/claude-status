@@ -566,6 +566,11 @@ def install():
     if not already:
         stop_hooks.append({'hooks': [{'type': 'command', 'command': hook_cmd}]})
 
+    # Register native statusLine widget (persistent bar below input text)
+    existing_sl = settings.get('statusLine', {})
+    if not existing_sl or existing_sl.get('command') != hook_cmd:
+        settings['statusLine'] = {'type': 'command', 'command': hook_cmd}
+
     new_content = json.dumps(settings, indent=2)
     # Validate
     try:
@@ -576,7 +581,7 @@ def install():
 
     SETTINGS_PATH.write_text(new_content)
     print(f'Installed claude_status hook → {INSTALL_PATH}')
-    print(f'Updated settings.json with Stop hook.')
+    print(f'Updated settings.json with Stop hook and statusLine widget.')
 
 
 def uninstall():
@@ -605,8 +610,13 @@ def uninstall():
         )
     ]
     hooks['Stop'] = new_stop
+
+    # Remove statusLine if it points to our script
+    if settings.get('statusLine', {}).get('command') == hook_cmd:
+        del settings['statusLine']
+
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
-    print('Removed claude_status Stop hook from settings.json.')
+    print('Removed claude_status Stop hook and statusLine from settings.json.')
 
 
 # ---------------------------------------------------------------------------
@@ -672,21 +682,56 @@ def main():
     _log(f'  config      : {CONFIG_PATH}')
     _log(f'  plan        : {config.get("plan")}')
 
-    # Try primary path: keychain → API
-    _log('--- primary path: Keychain + API ---')
-    token_info = read_keychain_token()
-    if token_info:
-        _log(f'  keychain    : OK  subscription={token_info.get("subscription_type")}  expires_at={token_info.get("expires_at")}')
-        t1 = _time.monotonic()
-        api_data = fetch_usage_api(token_info['access_token'])
-        elapsed_ms = int((_time.monotonic() - t1) * 1000)
-        _log(f'  api fetch   : {"OK" if api_data else "FAIL"}  ({elapsed_ms}ms)')
-        if api_data:
-            _log(f'  raw api     : {json.dumps(api_data)}')
-            five_hour, seven_day = parse_api_result(api_data)
-            subscription = token_info.get('subscription_type')
+    # Native statusLine mode: Claude Code sends JSON via stdin with rate_limits, context_window, model
+    native = None
+    if not sys.stdin.isatty():
+        try:
+            raw = sys.stdin.buffer.read()
+            if raw and raw.strip():
+                native = json.loads(raw.decode('utf-8', errors='replace'))
+        except Exception:
+            pass
+
+    _log(f'  native_input: {"yes" if native else "no (tty or empty)"}')
+
+    # Extract rate limits from native JSON if available (avoids API call)
+    if native:
+        rl = native.get('rate_limits') or {}
+        fh = rl.get('five_hour') or {}
+        sd = rl.get('seven_day') or {}
+        if fh.get('used_percentage') is not None:
+            resets_fh = fh.get('resets_at')
+            if isinstance(resets_fh, (int, float)):
+                resets_fh = datetime.fromtimestamp(resets_fh, tz=timezone.utc).isoformat()
+            five_hour = {'pct': float(fh['used_percentage']), 'resets_at': resets_fh or '', 'is_estimate': False}
+        if sd.get('used_percentage') is not None:
+            resets_sd = sd.get('resets_at')
+            if isinstance(resets_sd, (int, float)):
+                resets_sd = datetime.fromtimestamp(resets_sd, tz=timezone.utc).isoformat()
+            seven_day = {'pct': float(sd['used_percentage']), 'resets_at': resets_sd or '', 'is_estimate': False}
+        _log(f'  native_rl   : 5h={five_hour["pct"] if five_hour else "n/a"}% 7d={seven_day["pct"] if seven_day else "n/a"}%')
+
+    # Try primary path: keychain → API (skipped if native already provided rate limits)
+    if five_hour is None or seven_day is None:
+        _log('--- primary path: Keychain + API ---')
+        token_info = read_keychain_token()
+        if token_info:
+            _log(f'  keychain    : OK  subscription={token_info.get("subscription_type")}  expires_at={token_info.get("expires_at")}')
+            t1 = _time.monotonic()
+            api_data = fetch_usage_api(token_info['access_token'])
+            elapsed_ms = int((_time.monotonic() - t1) * 1000)
+            _log(f'  api fetch   : {"OK" if api_data else "FAIL"}  ({elapsed_ms}ms)')
+            if api_data:
+                _log(f'  raw api     : {json.dumps(api_data)}')
+                five_hour, seven_day = parse_api_result(api_data)
+                subscription = token_info.get('subscription_type')
+        else:
+            _log('  keychain    : FAIL (not found or access denied)')
     else:
-        _log('  keychain    : FAIL (not found or access denied)')
+        # Still read keychain for subscription type (fast, no network)
+        token_info = read_keychain_token()
+        if token_info:
+            subscription = token_info.get('subscription_type')
 
     # Fallback: JSONL
     if five_hour is None or seven_day is None:
@@ -716,37 +761,51 @@ def main():
     _log(f'  5h          : pct={five_hour["pct"]:.1f}%  resets_at={five_hour["resets_at"]}  est={five_hour["is_estimate"]}')
     _log(f'  7d          : pct={seven_day["pct"]:.1f}%  resets_at={seven_day["resets_at"]}  est={seven_day["is_estimate"]}')
 
-    # Read context
-    ctx_pct, ctx_detail = read_context_pct()
+    # Context window: use native JSON if available (already computed by Claude Code)
+    ctx_pct, ctx_detail = None, None
+    if native:
+        cw = native.get('context_window') or {}
+        used_pct = cw.get('used_percentage')
+        if used_pct is not None:
+            ctx_pct = float(used_pct)
+            total = int(cw.get('context_window_size') or DEFAULT_CTX)
+            used_tokens = int(total * used_pct / 100)
+            ctx_detail = f'{used_tokens // 1000}K/{total // 1000}K'
+    if ctx_pct is None:
+        ctx_pct, ctx_detail = read_context_pct()
 
     _log(f'  context     : {ctx_pct:.1f}% ({ctx_detail})' if ctx_pct is not None else '  context     : (not available)')
 
-    # Detect model from most recent JSONL
+    # Model: use native JSON if available, otherwise scan JSONL
     model_name = None
-    try:
-        base = _PROJECTS_BASE
-        if base.exists():
-            jsonl_files = sorted(
-                base.rglob('*.jsonl'),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            if jsonl_files:
-                with open(jsonl_files[0], 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                            if obj.get('type') == 'assistant':
-                                m = obj.get('message', {}).get('model')
-                                if m and m != '<synthetic>':
-                                    model_name = m
-                        except json.JSONDecodeError:
-                            pass
-    except Exception:
-        pass
+    if native:
+        m = (native.get('model') or {})
+        model_name = m.get('id') or m.get('display_name') or None
+    if not model_name:
+        try:
+            base = _PROJECTS_BASE
+            if base.exists():
+                jsonl_files = sorted(
+                    base.rglob('*.jsonl'),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if jsonl_files:
+                    with open(jsonl_files[0], 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                                if obj.get('type') == 'assistant':
+                                    m = obj.get('message', {}).get('model')
+                                    if m and m != '<synthetic>':
+                                        model_name = m
+                            except json.JSONDecodeError:
+                                pass
+        except Exception:
+            pass
 
     _log(f'  model       : {model_name or "(not detected)"}')
 
