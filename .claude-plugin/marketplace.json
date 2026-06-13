@@ -1,12 +1,13 @@
 {
-  "catalog": [
+  "name": "kalfian-claude-status",
+  "owner": {
+    "name": "kalfian",
+    "email": "kukuhalf@gmail.com"
+  },
+  "plugins": [
     {
       "name": "claude-status",
       "description": "Real-time statusline showing 5h session %, weekly %, context window, and reset times. Zero tokens consumed.",
-      "author": {
-        "name": "kalfian",
-        "email": "kukuhalf@gmail.com"
-      },
       "category": "productivity",
       "source": {
         "source": "url",

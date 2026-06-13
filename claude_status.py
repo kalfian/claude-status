@@ -554,14 +554,17 @@ def install():
     hooks = settings.setdefault('hooks', {})
     stop_hooks = hooks.setdefault('Stop', [])
 
-    # Idempotent: check if already present
+    # Idempotent: check if already present (match inner command string)
     already = any(
-        (isinstance(h, dict) and h.get('command', '') == hook_cmd)
-        or h == hook_cmd
+        isinstance(h, dict) and any(
+            inner.get('command', '') == hook_cmd
+            for inner in h.get('hooks', [])
+            if isinstance(inner, dict)
+        )
         for h in stop_hooks
     )
     if not already:
-        stop_hooks.append({'command': hook_cmd, 'type': 'stop'})
+        stop_hooks.append({'hooks': [{'type': 'command', 'command': hook_cmd}]})
 
     new_content = json.dumps(settings, indent=2)
     # Validate
@@ -594,8 +597,11 @@ def uninstall():
     new_stop = [
         h for h in stop_hooks
         if not (
-            (isinstance(h, dict) and h.get('command', '') == hook_cmd)
-            or h == hook_cmd
+            isinstance(h, dict) and any(
+                inner.get('command', '') == hook_cmd
+                for inner in h.get('hooks', [])
+                if isinstance(inner, dict)
+            )
         )
     ]
     hooks['Stop'] = new_stop
