@@ -613,6 +613,7 @@ def main():
     parser.add_argument('--set-plan', choices=['pro', 'max_100', 'custom'])
     parser.add_argument('--install', action='store_true')
     parser.add_argument('--uninstall', action='store_true')
+    parser.add_argument('--dev', action='store_true', help='Developer mode: verbose diagnostics')
     args = parser.parse_args()
 
     if args.install:
@@ -638,24 +639,50 @@ def main():
 
     config = load_config()
     use_color = not config.get('no_color', False)
+    dev = args.dev
+
+    def _dev(msg: str) -> None:
+        if dev:
+            print(f'  {msg}', file=sys.stderr)
 
     five_hour = None
     seven_day = None
     subscription = None
     is_fallback = False
 
+    if dev:
+        import time
+        print('\n\033[1mclaude-status --dev\033[0m', file=sys.stderr)
+        print(f'  script: {__file__}', file=sys.stderr)
+        print(f'  plugin root: {os.environ.get("CLAUDE_PLUGIN_ROOT", "(not set — running directly)")}', file=sys.stderr)
+        print(f'  config: {CONFIG_PATH}', file=sys.stderr)
+        print(f'  plan: {config.get("plan")}', file=sys.stderr)
+
     # Try primary path: keychain → API
+    _dev('→ primary path: Keychain + API')
+    t0 = __import__('time').monotonic() if dev else 0
     token_info = read_keychain_token()
     if token_info:
+        _dev(f'  keychain: ✓  subscription={token_info.get("subscription_type")}  expires_at={token_info.get("expires_at")}')
+        t1 = __import__('time').monotonic() if dev else 0
         api_data = fetch_usage_api(token_info['access_token'])
+        if dev:
+            elapsed = __import__('time').monotonic() - t1
+            print(f'  api fetch: {"✓" if api_data else "✗"}  ({elapsed*1000:.0f}ms)', file=sys.stderr)
         if api_data:
+            if dev:
+                print(f'  raw api: {json.dumps(api_data)}', file=sys.stderr)
             five_hour, seven_day = parse_api_result(api_data)
             subscription = token_info.get('subscription_type')
+    else:
+        _dev('  keychain: ✗ (not found or access denied)')
 
     # Fallback: JSONL
     if five_hour is None or seven_day is None:
         is_fallback = True
+        _dev('→ fallback path: JSONL')
         groups = scan_session_files()
+        _dev(f'  sessions found: {len(groups)}')
         all_requests = []
         for fps in groups.values():
             all_requests.extend(parse_session_requests(fps))
@@ -675,8 +702,14 @@ def main():
         five_hour = _make_fallback_result(five_window, 5)
         seven_day = _make_fallback_result(seven_window, 168)
 
+    if dev:
+        print(f'  5h: pct={five_hour["pct"]:.1f}%  resets_at={five_hour["resets_at"]}  est={five_hour["is_estimate"]}', file=sys.stderr)
+        print(f'  7d: pct={seven_day["pct"]:.1f}%  resets_at={seven_day["resets_at"]}  est={seven_day["is_estimate"]}', file=sys.stderr)
+
     # Read context
     ctx_pct, ctx_detail = read_context_pct()
+
+    _dev(f'  context: {ctx_pct:.1f}% ({ctx_detail})' if ctx_pct is not None else '  context: (not available)')
 
     # Detect model from most recent JSONL
     model_name = None
@@ -705,7 +738,10 @@ def main():
     except Exception:
         pass
 
+    _dev(f'  model: {model_name or "(not detected)"}')
+
     term_width = shutil.get_terminal_size((80, 24)).columns
+    _dev(f'  term_width: {term_width}  is_fallback: {is_fallback}')
 
     quiet_below = config.get('quiet_below_pct', 0)
     max_pct = max(five_hour['pct'], seven_day['pct'])
