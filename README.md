@@ -60,7 +60,7 @@ cd claude-status
 python3 claude_status.py
 ```
 
-### 2. Developer mode — verbose diagnostics
+### 2. Developer mode — verbose diagnostics to stderr
 
 Shows data source, API latency, raw values, fallback state, and detected model:
 
@@ -71,43 +71,69 @@ python3 claude_status.py --dev
 Example output (stderr):
 
 ```
-claude-status --dev
-  script: /path/to/claude_status.py
-  plugin root: (not set — running directly)
-  config: ~/.claude/claude-status-config.json
-  plan: pro
-→ primary path: Keychain + API
-  keychain: ✓  subscription=pro  expires_at=9999999999999
-  api fetch: ✓  (142ms)
-  raw api: {"five_hour": {"utilization": 54.0, ...}, ...}
-  5h: pct=54.0%  resets_at=2026-06-13T07:40:00+00:00  est=False
-  7d: pct=6.0%   resets_at=2026-06-16T10:00:00+00:00  est=False
-  context: 78.1% (156K/200K)
-  model: claude-sonnet-4-6
-  term_width: 220  is_fallback: False
+claude-status diagnostic  [2026-06-13 10:51:13]
+  script      : /path/to/claude_status.py
+  python      : 3.14.4  platform=darwin
+  plugin_root : (not set — running directly)
+  config      : ~/.claude/claude-status-config.json
+  plan        : pro
+--- primary path: Keychain + API ---
+  keychain    : OK  subscription=pro  expires_at=1781347063552
+  api fetch   : OK  (142ms)
+  raw api     : {"five_hour": {"utilization": 54.0, ...}, ...}
+  5h          : pct=54.0%  resets_at=2026-06-13T07:40:00+00:00  est=False
+  7d          : pct=6.0%   resets_at=2026-06-16T10:00:00+00:00  est=False
+  context     : 78.1% (156K/200K)
+  model       : claude-sonnet-4-6
+  term_width  : 220  is_fallback=False
+  elapsed_ms  : 580
 ```
 
-### 3. Test as Claude Code plugin (local, before publish)
+### 3. Debug mode — write log to file (use when running as hook)
+
+When the Stop hook fires there's no visible terminal. Use `--debug` to write a log file instead:
+
+```bash
+python3 claude_status.py --debug
+```
+
+Log is written to:
+- **macOS / Linux**: `/tmp/claude-status-debug.log`
+- **Windows**: `%TEMP%\claude-status-debug.log`
+
+Multiple hook fires append to the same file. Tail it during a session:
+
+```bash
+tail -f /tmp/claude-status-debug.log
+```
+
+To use debug mode via the hook, temporarily edit `hooks/hooks.json`:
+
+```json
+"command": "python3 \"${CLAUDE_PLUGIN_ROOT}/claude_status.py\" --debug"
+```
+
+### 4. Test as Claude Code plugin (local, before publish)
 
 ```bash
 # Launch Claude Code pointing at local plugin directory
 claude --plugin-dir /path/to/claude-status
 ```
 
-The Stop hook will fire from the local directory. Use `--dev` to confirm `CLAUDE_PLUGIN_ROOT` is set correctly:
+The Stop hook fires from the local directory. Verify `CLAUDE_PLUGIN_ROOT` is set correctly:
 
 ```bash
 python3 claude_status.py --dev
-# plugin root: /path/to/claude-status  ← should show actual path, not "(not set)"
+# plugin_root : /path/to/claude-status  ← should not say "(not set)"
 ```
 
-### 4. JSON output (machine-readable)
+### 5. JSON output (machine-readable)
 
 ```bash
 python3 claude_status.py --mode json | jq .
 ```
 
-### 5. Run tests
+### 6. Run tests
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -117,10 +143,38 @@ pytest tests/ -v
 
 All 56 tests should pass.
 
-### 6. Reload plugin mid-session
+### 7. Reload plugin mid-session
 
 ```
 /reload-plugins
+```
+
+---
+
+## Uninstall
+
+### Plugin install (via `/plugin install`)
+
+Remove only the plugin, keep nothing:
+
+```
+/plugin uninstall claude-status
+```
+
+### Manual install (via `--install`)
+
+Remove the Stop hook from `settings.json`, keep the script:
+
+```bash
+python3 ~/.claude/scripts/claude_status.py --uninstall
+```
+
+Full removal — remove hook AND script file:
+
+```bash
+python3 ~/.claude/scripts/claude_status.py --uninstall
+rm ~/.claude/scripts/claude_status.py
+rm -f ~/.claude/claude-status-config.json
 ```
 
 ---

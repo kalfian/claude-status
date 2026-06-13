@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
@@ -613,7 +614,8 @@ def main():
     parser.add_argument('--set-plan', choices=['pro', 'max_100', 'custom'])
     parser.add_argument('--install', action='store_true')
     parser.add_argument('--uninstall', action='store_true')
-    parser.add_argument('--dev', action='store_true', help='Developer mode: verbose diagnostics')
+    parser.add_argument('--dev', action='store_true', help='Developer mode: verbose diagnostics to stderr')
+    parser.add_argument('--debug', action='store_true', help='Write debug log to temp file (useful when running as hook)')
     args = parser.parse_args()
 
     if args.install:
@@ -640,49 +642,52 @@ def main():
     config = load_config()
     use_color = not config.get('no_color', False)
     dev = args.dev
+    debug = args.debug
 
-    def _dev(msg: str) -> None:
-        if dev:
-            print(f'  {msg}', file=sys.stderr)
+    # Collect diagnostic lines; flush to stderr and/or file at end
+    _log_lines: list = []
+
+    def _log(msg: str) -> None:
+        if dev or debug:
+            _log_lines.append(msg)
 
     five_hour = None
     seven_day = None
     subscription = None
     is_fallback = False
 
-    if dev:
-        import time
-        print('\n\033[1mclaude-status --dev\033[0m', file=sys.stderr)
-        print(f'  script: {__file__}', file=sys.stderr)
-        print(f'  plugin root: {os.environ.get("CLAUDE_PLUGIN_ROOT", "(not set — running directly)")}', file=sys.stderr)
-        print(f'  config: {CONFIG_PATH}', file=sys.stderr)
-        print(f'  plan: {config.get("plan")}', file=sys.stderr)
+    import time as _time
+    _start = _time.monotonic()
+
+    _log(f'claude-status diagnostic  [{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}]')
+    _log(f'  script      : {__file__}')
+    _log(f'  python      : {sys.version.split()[0]}  platform={sys.platform}')
+    _log(f'  plugin_root : {os.environ.get("CLAUDE_PLUGIN_ROOT", "(not set — running directly)")}')
+    _log(f'  config      : {CONFIG_PATH}')
+    _log(f'  plan        : {config.get("plan")}')
 
     # Try primary path: keychain → API
-    _dev('→ primary path: Keychain + API')
-    t0 = __import__('time').monotonic() if dev else 0
+    _log('--- primary path: Keychain + API ---')
     token_info = read_keychain_token()
     if token_info:
-        _dev(f'  keychain: ✓  subscription={token_info.get("subscription_type")}  expires_at={token_info.get("expires_at")}')
-        t1 = __import__('time').monotonic() if dev else 0
+        _log(f'  keychain    : OK  subscription={token_info.get("subscription_type")}  expires_at={token_info.get("expires_at")}')
+        t1 = _time.monotonic()
         api_data = fetch_usage_api(token_info['access_token'])
-        if dev:
-            elapsed = __import__('time').monotonic() - t1
-            print(f'  api fetch: {"✓" if api_data else "✗"}  ({elapsed*1000:.0f}ms)', file=sys.stderr)
+        elapsed_ms = int((_time.monotonic() - t1) * 1000)
+        _log(f'  api fetch   : {"OK" if api_data else "FAIL"}  ({elapsed_ms}ms)')
         if api_data:
-            if dev:
-                print(f'  raw api: {json.dumps(api_data)}', file=sys.stderr)
+            _log(f'  raw api     : {json.dumps(api_data)}')
             five_hour, seven_day = parse_api_result(api_data)
             subscription = token_info.get('subscription_type')
     else:
-        _dev('  keychain: ✗ (not found or access denied)')
+        _log('  keychain    : FAIL (not found or access denied)')
 
     # Fallback: JSONL
     if five_hour is None or seven_day is None:
         is_fallback = True
-        _dev('→ fallback path: JSONL')
+        _log('--- fallback path: JSONL ---')
         groups = scan_session_files()
-        _dev(f'  sessions found: {len(groups)}')
+        _log(f'  sessions     : {len(groups)}')
         all_requests = []
         for fps in groups.values():
             all_requests.extend(parse_session_requests(fps))
@@ -702,14 +707,13 @@ def main():
         five_hour = _make_fallback_result(five_window, 5)
         seven_day = _make_fallback_result(seven_window, 168)
 
-    if dev:
-        print(f'  5h: pct={five_hour["pct"]:.1f}%  resets_at={five_hour["resets_at"]}  est={five_hour["is_estimate"]}', file=sys.stderr)
-        print(f'  7d: pct={seven_day["pct"]:.1f}%  resets_at={seven_day["resets_at"]}  est={seven_day["is_estimate"]}', file=sys.stderr)
+    _log(f'  5h          : pct={five_hour["pct"]:.1f}%  resets_at={five_hour["resets_at"]}  est={five_hour["is_estimate"]}')
+    _log(f'  7d          : pct={seven_day["pct"]:.1f}%  resets_at={seven_day["resets_at"]}  est={seven_day["is_estimate"]}')
 
     # Read context
     ctx_pct, ctx_detail = read_context_pct()
 
-    _dev(f'  context: {ctx_pct:.1f}% ({ctx_detail})' if ctx_pct is not None else '  context: (not available)')
+    _log(f'  context     : {ctx_pct:.1f}% ({ctx_detail})' if ctx_pct is not None else '  context     : (not available)')
 
     # Detect model from most recent JSONL
     model_name = None
@@ -738,10 +742,30 @@ def main():
     except Exception:
         pass
 
-    _dev(f'  model: {model_name or "(not detected)"}')
+    _log(f'  model       : {model_name or "(not detected)"}')
 
     term_width = shutil.get_terminal_size((80, 24)).columns
-    _dev(f'  term_width: {term_width}  is_fallback: {is_fallback}')
+    _log(f'  term_width  : {term_width}  is_fallback={is_fallback}')
+    _log(f'  elapsed_ms  : {int((_time.monotonic() - _start) * 1000)}')
+
+    # Flush diagnostic log
+    if _log_lines:
+        log_text = '\n'.join(_log_lines) + '\n'
+        if dev:
+            print('\n' + log_text, file=sys.stderr, end='')
+        if debug:
+            # Use a stable, human-findable path (not the random macOS per-user tmp)
+            if sys.platform == 'win32':
+                tmp_dir = Path(tempfile.gettempdir())
+            else:
+                tmp_dir = Path('/tmp')
+            log_path = tmp_dir / 'claude-status-debug.log'
+            try:
+                with open(log_path, 'a') as f:
+                    f.write(log_text + '\n')
+                print(f'[claude-status] debug log → {log_path}', file=sys.stderr)
+            except OSError:
+                pass  # Never block the hook
 
     quiet_below = config.get('quiet_below_pct', 0)
     max_pct = max(five_hour['pct'], seven_day['pct'])
