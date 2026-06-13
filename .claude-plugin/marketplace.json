@@ -1,0 +1,15 @@
+{
+  "catalog": [
+    {
+      "id": "claude-status",
+      "name": "Claude Status",
+      "description": "Real-time statusline showing 5h session %, weekly %, context window, and reset times. Zero tokens consumed.",
+      "version": "0.0.1",
+      "source": {
+        "type": "git",
+        "url": "https://github.com/kalfian/claude-status.git",
+        "ref": "main"
+      }
+    }
+  ]
+}
