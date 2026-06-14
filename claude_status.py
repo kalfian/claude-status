@@ -57,7 +57,8 @@ CLEANUP_SCRIPT_PATH = Path.home() / '.claude' / 'scripts' / 'claude-status-clean
 PLUGIN_KEY = 'claude-status@kalfian-claude-code'
 
 # Disk cache for API responses — avoids hammering API on frequent statusLine refreshes
-_CACHE_PATH = Path('/tmp/claude-status-cache.json')
+import tempfile as _tempfile
+_CACHE_PATH = Path(_tempfile.gettempdir()) / 'claude-status-cache.json'
 _CACHE_TTL_SECONDS = 60
 
 _UUID4_RE = re.compile(
@@ -67,28 +68,83 @@ _UUID4_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
-# Module: Keychain reader
+# Module: Credential reader (cross-platform)
 # ---------------------------------------------------------------------------
-def read_keychain_token() -> Optional[dict]:
-    """Returns {'access_token': str, 'expires_at': int, 'subscription_type': str} or None."""
+def _parse_credential_json(raw: str) -> Optional[dict]:
+    """Parse OAuth JSON from any credential store and return normalized dict."""
+    outer = json.loads(raw.strip())
+    oauth = outer['claudeAiOauth']
+    return {
+        'access_token': oauth['accessToken'],
+        'expires_at': oauth['expiresAt'],
+        'subscription_type': oauth.get('subscriptionType', 'pro'),
+    }
+
+
+def _read_credentials_macos() -> Optional[dict]:
+    """macOS: read from Keychain via `security` command."""
     try:
         result = subprocess.run(
             ['security', 'find-generic-password', '-s', 'Claude Code-credentials', '-w'],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
             return None
-        outer = json.loads(result.stdout.strip())
-        oauth = outer['claudeAiOauth']
-        return {
-            'access_token': oauth['accessToken'],
-            'expires_at': oauth['expiresAt'],
-            'subscription_type': oauth.get('subscriptionType', 'pro'),
-        }
+        return _parse_credential_json(result.stdout)
     except Exception:
         return None
+
+
+def _read_credentials_linux() -> Optional[dict]:
+    """Linux: try secret-tool (libsecret / GNOME keyring)."""
+    try:
+        result = subprocess.run(
+            ['secret-tool', 'lookup', 'service', 'Claude Code-credentials'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return _parse_credential_json(result.stdout)
+    except Exception:
+        pass
+    return None
+
+
+def _read_credentials_windows() -> Optional[dict]:
+    """Windows: read from Credential Manager via PowerShell."""
+    try:
+        ps = (
+            '$c = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory();'
+            'Add-Type -AssemblyName System.Security;'
+            '$cred = [System.Security.Cryptography.ProtectedData];'
+            # Use built-in cmdkey to query, then read via .NET CredentialCache
+            # Simpler: use PSCredential stored in Windows Credential Manager
+            '$mgr = [Windows.Security.Credentials.PasswordVault,Windows.Security,'
+            'ContentType=WindowsRuntime]::new();'
+            '($mgr.FindAllByResource("Claude Code-credentials") | Select -First 1 |'
+            '% { $_.RetrievePassword(); $_ }).Password'
+        )
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+            capture_output=True, text=True, timeout=8,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return _parse_credential_json(result.stdout)
+    except Exception:
+        pass
+    return None
+
+
+def read_keychain_token() -> Optional[dict]:
+    """Returns {'access_token': str, 'expires_at': int, 'subscription_type': str} or None.
+    Dispatches to the platform-appropriate credential store.
+    """
+    if sys.platform == 'darwin':
+        return _read_credentials_macos()
+    elif sys.platform == 'linux':
+        return _read_credentials_linux()
+    elif sys.platform == 'win32':
+        return _read_credentials_windows()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +220,15 @@ def parse_api_result(data: dict) -> Tuple[dict, dict]:
 
 
 # ---------------------------------------------------------------------------
+# Cross-platform day formatting helper
+# ---------------------------------------------------------------------------
+def _fmt_day_no_pad(dt) -> str:
+    """Format day number without leading zero. %-d on Unix, %#d on Windows."""
+    fmt = '%#d' if sys.platform == 'win32' else '%-d'
+    return dt.strftime(fmt)
+
+
+# ---------------------------------------------------------------------------
 # Module: Reset label formatter
 # ---------------------------------------------------------------------------
 def format_reset_label(resets_at_iso) -> str:
@@ -185,7 +250,7 @@ def format_reset_label(resets_at_iso) -> str:
         if reset_local.date() == local_now.date():
             return f'resets today {time_str}'
         else:
-            month_day = reset_local.strftime('%b %-d')
+            month_day = f'{reset_local.strftime("%b")} {_fmt_day_no_pad(reset_local)}'
             return f'resets {month_day} {time_str}'
     except Exception:
         return ''
@@ -211,7 +276,7 @@ def format_reset_compact(resets_at_iso) -> str:
         if reset_local.date() == local_now.date():
             return f'↺ {reset_local.strftime("%H:%M")}'
         else:
-            return f'↺ {reset_local.strftime("%b %-d %H:%M")}'
+            return f'↺ {reset_local.strftime("%b")} {_fmt_day_no_pad(reset_local)} {reset_local.strftime("%H:%M")}'
     except Exception:
         return ''
 
@@ -1122,12 +1187,7 @@ def main():
         if dev:
             print('\n' + log_text, file=sys.stderr, end='')
         if debug:
-            # Use a stable, human-findable path (not the random macOS per-user tmp)
-            if sys.platform == 'win32':
-                tmp_dir = Path(tempfile.gettempdir())
-            else:
-                tmp_dir = Path('/tmp')
-            log_path = tmp_dir / 'claude-status-debug.log'
+            log_path = Path(tempfile.gettempdir()) / 'claude-status-debug.log'
             try:
                 with open(log_path, 'a') as f:
                     f.write(log_text + '\n')

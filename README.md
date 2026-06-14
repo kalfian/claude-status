@@ -8,13 +8,13 @@ Real-time Claude Code statusline — session %, weekly %, context window, and re
 Session █████░░░░░ 54%  ↺ today 14:40  │  Weekly ░░░░░░░░░░ 6%  ↺ Jun 16 17:00  │  Context ███████░░░ 78%  156K/200K  │  ◆ Pro
 ```
 
-Reads directly from `api.anthropic.com/api/oauth/usage` via OAuth token stored in macOS Keychain — no Cloudflare, no session cost. Falls back to JSONL parsing if the API is unavailable.
+Reads directly from `api.anthropic.com/api/oauth/usage` via OAuth token stored in the OS credential store — no Cloudflare, no session cost. Falls back to JSONL parsing if the credential store is unavailable.
 
 ---
 
 ## Requirements
 
-- macOS (Keychain access for OAuth token)
+- macOS, Linux, or Windows
 - Claude Code with Pro or Max subscription
 - Python 3.9+
 
@@ -117,12 +117,15 @@ Optional config at `~/.claude/claude-status-config.json`:
 
 ## How it works
 
-1. Reads OAuth token from macOS Keychain (`Claude Code-credentials`)
+1. Reads OAuth token from the OS credential store:
+   - **macOS** — Keychain (`Claude Code-credentials` via `security`)
+   - **Linux** — GNOME keyring (`secret-tool`)
+   - **Windows** — Windows Credential Manager (via PowerShell)
 2. Calls `api.anthropic.com/api/oauth/usage` — no Cloudflare, no token consumption
 3. Reads current context % from the most recently modified JSONL session file
 4. Renders a color-coded statusline via the Stop hook
 
-Falls back to JSONL-based token estimation (labeled `est.`) if the API is unavailable.
+Falls back to JSONL-based token estimation (labeled `est.`) if the credential store is unavailable or the API call fails.
 
 ### Color scheme
 

@@ -52,9 +52,12 @@ The workflow will:
 
 ---
 
-## GitHub Actions workflow
+## GitHub Actions workflows
 
-Defined at `.github/workflows/release.yml`. Triggers on `v*` tags pushed to `main`.
+| File | Trigger | Purpose |
+|---|---|---|
+| `.github/workflows/ci.yml` | push / PR to `main` | Run tests on Python 3.9/3.11/3.13 × macOS/Linux/Windows |
+| `.github/workflows/release.yml` | push `v*` tag | Run tests, build zip, create GitHub Release |
 
 ---
 
