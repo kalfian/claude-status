@@ -1,12 +1,19 @@
 # claude-status
 
-Real-time Claude Code statusline — session %, weekly %, context window, and reset times. Renders automatically after every response via Stop hook. Zero tokens consumed.
+Real-time Claude Code statusline — session %, weekly %, context window, reset times, current project folder, and live git branch. Renders automatically after every response via Stop hook. Zero tokens consumed.
 
 ![claude-status demo](assets/demo.svg)
 
 ```
-Session █████░░░░░ 54%  ↺ today 14:40  │  Weekly ░░░░░░░░░░ 6%  ↺ Jun 16 17:00  │  Context ███████░░░ 78%  156K/200K  │  ◆ Pro
+Session ━━━━━─────  54% ↺ 14:40   Weekly ━─────────   6% ↺ Aug 20 04:00   Context ━━━━━━━━──  78% 156K/200K  ·  Sonnet 4.6 · Pro · claude-status · ⎇ main
 ```
+
+Gauges carry the usage colour (calm green → amber → orange → red past 90%); the
+identity cluster after the `·` divider — model, plan, project folder, branch —
+stays neutral grey, since colour on this line means utilization, not identity.
+The layout re-fits itself to the terminal width — long paths shorten, gauges
+shrink, then the least useful detail drops — so the line never wraps, down to
+a ~40-column tmux split.
 
 Reads directly from `api.anthropic.com/api/oauth/usage` via OAuth token stored in the OS credential store — no Cloudflare, no session cost. Falls back to JSONL parsing if the credential store is unavailable.
 
@@ -122,8 +129,16 @@ Optional config at `~/.claude/claude-status-config.json`:
    - **Linux** — GNOME keyring (`secret-tool`)
    - **Windows** — Windows Credential Manager (via PowerShell)
 2. Calls `api.anthropic.com/api/oauth/usage` — no Cloudflare, no token consumption
-3. Reads current context % from the most recently modified JSONL session file
-4. Renders a color-coded statusline via the Stop hook
+3. Reads current context % from the exact session transcript Claude Code passes on
+   stdin (`transcript_path`) — not a guess based on "most recently modified file,"
+   which broke down whenever another session or subagent touched
+   `~/.claude/projects/` more recently. Subagent/Task-tool (`isSidechain`) lines
+   are skipped so a subagent's small context never gets mistaken for the main
+   conversation's.
+4. Resolves the current git branch (`git rev-parse --abbrev-ref HEAD` in the
+   session's working directory) and the working directory itself — both
+   recomputed fresh on every refresh, so they stay live as you move around
+5. Renders a color-coded statusline via the Stop hook
 
 Falls back to JSONL-based token estimation (labeled `est.`) if the credential store is unavailable or the API call fails.
 
@@ -131,8 +146,8 @@ Falls back to JSONL-based token estimation (labeled `est.`) if the credential st
 
 | Usage | Color |
 |---|---|
-| 0 – 49% | Green |
-| 50 – 74% | Yellow |
+| 0 – 49% | Green (calm) |
+| 50 – 74% | Amber |
 | 75 – 89% | Orange |
 | ≥ 90% | Red + ⚠ |
 
@@ -172,6 +187,8 @@ claude-status diagnostic  [2026-06-13 10:51:13]
   7d          : pct=6.0%   resets_at=2026-06-16T10:00:00+00:00  est=False
   context     : 78.1% (156K/200K)
   model       : claude-sonnet-4-6
+  cwd         : ~/dev/claude-status
+  git_branch  : main
   elapsed_ms  : 580
 ```
 
@@ -230,7 +247,7 @@ pip install pytest
 pytest tests/ -v
 ```
 
-All 56 tests should pass.
+All 78 tests should pass.
 
 ---
 

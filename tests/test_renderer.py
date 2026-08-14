@@ -21,45 +21,48 @@ def import_module():
 # color_for
 # ---------------------------------------------------------------------------
 class TestColorFor:
+    """Asserts the threshold → palette-slot mapping, not the palette values.
+
+    The exact 256-color codes are a design decision and may be retuned; the
+    tier boundaries are behaviour and must not move.
+    """
+
     def test_green_at_zero(self):
         cs = import_module()
-        result = cs.color_for(0)
-        assert '\033[38;5;82m' in result
+        assert cs.color_for(0) == cs.ANSI['green']
 
     def test_green_at_49(self):
         cs = import_module()
-        result = cs.color_for(49)
-        assert '\033[38;5;82m' in result
+        assert cs.color_for(49) == cs.ANSI['green']
 
     def test_yellow_at_50(self):
         cs = import_module()
-        result = cs.color_for(50)
-        assert '\033[38;5;220m' in result
+        assert cs.color_for(50) == cs.ANSI['yellow']
 
     def test_yellow_at_74(self):
         cs = import_module()
-        result = cs.color_for(74)
-        assert '\033[38;5;220m' in result
+        assert cs.color_for(74) == cs.ANSI['yellow']
 
     def test_orange_at_75(self):
         cs = import_module()
-        result = cs.color_for(75)
-        assert '\033[38;5;208m' in result
+        assert cs.color_for(75) == cs.ANSI['orange']
 
     def test_orange_at_89(self):
         cs = import_module()
-        result = cs.color_for(89)
-        assert '\033[38;5;208m' in result
+        assert cs.color_for(89) == cs.ANSI['orange']
 
     def test_red_at_90(self):
         cs = import_module()
-        result = cs.color_for(90)
-        assert '\033[38;5;196m' in result
+        assert cs.color_for(90) == cs.ANSI['red']
 
     def test_red_at_100(self):
         cs = import_module()
-        result = cs.color_for(100)
-        assert '\033[38;5;196m' in result
+        assert cs.color_for(100) == cs.ANSI['red']
+
+    def test_tiers_are_visually_distinct(self):
+        cs = import_module()
+        slots = [cs.ANSI[k] for k in ('green', 'yellow', 'orange', 'red')]
+        assert len(set(slots)) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +115,31 @@ class TestRenderSegment:
         out = cs.render_segment('Weekly', 6.0, use_color=False)
         assert 'Weekly' in out
         assert '6%' in out
+
+    def test_nonzero_usage_fills_at_least_one_cell(self):
+        """1% must not render as an empty gauge — 'some' is not 'none'."""
+        cs = import_module()
+        out = cs.render_segment('Session', 1.0, line_len=10, use_color=False)
+        assert '[=---------]' in out
+
+    def test_zero_usage_fills_nothing(self):
+        cs = import_module()
+        out = cs.render_segment('Session', 0.0, line_len=10, use_color=False)
+        assert '[----------]' in out
+
+    def test_full_usage_fills_every_cell(self):
+        cs = import_module()
+        out = cs.render_segment('Session', 100.0, line_len=10, use_color=False)
+        assert '[==========]' in out
+
+    def test_pct_column_width_is_stable(self):
+        """Value block keeps a fixed width so the line doesn't jitter on refresh."""
+        cs = import_module()
+        widths = {
+            cs._visible_len(cs.render_segment('Session', p, use_color=False))
+            for p in (0.0, 7.0, 51.0, 89.0)  # >=90 intentionally adds ⚠
+        }
+        assert len(widths) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +242,21 @@ class TestRenderStatusLine:
         assert 'Session' in out
         assert 'Weekly' in out
 
+    def test_labels_abbreviate_below_60_columns(self):
+        cs = import_module()
+        kwargs = dict(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=None, ctx_detail=None, model_name=None, subscription=None,
+            is_fallback=False, use_color=False,
+        )
+        tiny = cs.render_status_line(term_width=50, **kwargs)
+        assert '5h' in tiny and '7d' in tiny
+        assert 'Session' not in tiny
+
+        normal = cs.render_status_line(term_width=60, **kwargs)
+        assert 'Session' in normal and 'Weekly' in normal
+
     def test_model_name_formatted(self):
         cs = import_module()
         five_hour = self._make_result(54.0)
@@ -283,6 +326,117 @@ class TestRenderStatusLine:
             term_width=120,
         )
         assert '\033[' not in out
+
+    def test_never_exceeds_terminal_width(self):
+        """A wrapped statusline is the worst failure mode — the fit ladder must
+        keep every width tier, both render modes, inside the terminal."""
+        cs = import_module()
+        long_cwd = '/Users/someone/Developments/vibe-coding/a-rather-long-project-name'
+        # 40 columns is the documented floor — below that two gauges plus their
+        # values physically cannot fit.
+        for width in (40, 48, 55, 59, 60, 72, 80, 89, 90, 95, 110, 119, 120,
+                      130, 139, 140, 152, 200):
+            for use_color in (True, False):
+                for pct in (0.0, 51.0, 93.0, 100.0):
+                    out = cs.render_status_line(
+                        five_hour=self._make_result(pct),
+                        seven_day=self._make_result(pct, '2026-06-16T10:00:00+00:00'),
+                        ctx_pct=pct,
+                        ctx_detail='156K/200K',
+                        model_name='claude-sonnet-4-6',
+                        subscription='max',
+                        is_fallback=False,
+                        use_color=use_color,
+                        term_width=width,
+                        git_branch='feature/some-branch',
+                        cwd=long_cwd,
+                    )
+                    assert cs._visible_len(out) <= width, (
+                        f'overflow at width={width} color={use_color} pct={pct}: '
+                        f'{cs._visible_len(out)} cols'
+                    )
+
+    def test_model_and_branch_survive_narrow_widths(self):
+        """The cwd yields under pressure; model/plan/branch never do."""
+        cs = import_module()
+        out = cs.render_status_line(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=78.0,
+            ctx_detail='156K/200K',
+            model_name='claude-sonnet-4-6',
+            subscription='pro',
+            is_fallback=False,
+            use_color=True,
+            term_width=110,
+            git_branch='main',
+            cwd='/Users/someone/Developments/vibe-coding/personal-bot',
+        )
+        assert 'Sonnet 4.6' in out
+        assert 'Pro' in out
+        assert '⎇ main' in out
+        # Full path can't fit at 110 — it degrades to the folder name or drops.
+        assert '/Users/someone/Developments' not in out
+
+    def test_cwd_degrades_to_folder_name_before_being_dropped(self):
+        cs = import_module()
+        out = cs.render_status_line(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=78.0,
+            ctx_detail='156K/200K',
+            model_name='claude-sonnet-4-6',
+            subscription='pro',
+            is_fallback=False,
+            use_color=True,
+            term_width=152,
+            git_branch='main',
+            cwd='/Users/someone/Developments/vibe-coding/personal-bot',
+        )
+        assert 'personal-bot' in out
+        assert '~/Developments/vibe-coding/personal-bot' not in out
+
+    def test_single_class_divider(self):
+        """· marks the metrics/identity boundary — same glyph as the identity
+        cluster's own separators, so there's one separator style, not two."""
+        cs = import_module()
+        out = cs.render_status_line(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=78.0,
+            ctx_detail='156K/200K',
+            model_name='claude-sonnet-4-6',
+            subscription='pro',
+            is_fallback=False,
+            use_color=True,
+            term_width=200,
+        )
+        assert '│' not in out
+        # boundary divider + 2 identity-cluster separators (model·plan, plan·branch-less here: model·plan)
+        assert out.count('·') >= 2
+
+        out_plain = cs.render_status_line(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=78.0,
+            ctx_detail='156K/200K',
+            model_name='claude-sonnet-4-6',
+            subscription='pro',
+            is_fallback=False,
+            use_color=False,
+            term_width=200,
+        )
+        assert '|' not in out_plain
+        assert '  ·  ' in out_plain
+
+    def test_identity_cluster_is_never_colored(self):
+        """Color on this line means utilization; identity stays neutral."""
+        cs = import_module()
+        identity = cs._render_identity(
+            'claude-sonnet-4-6', 'pro', '~/dev/app', 'main', True, 'full',
+        )
+        for slot in ('green', 'yellow', 'orange', 'red'):
+            assert cs.ANSI[slot] not in identity
 
 
 # ---------------------------------------------------------------------------

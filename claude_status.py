@@ -27,15 +27,45 @@ CTX_WINDOW = {
 }
 DEFAULT_CTX = 200_000
 
+# ---------------------------------------------------------------------------
+# Design tokens
+# ---------------------------------------------------------------------------
+# Two information classes share this line and must not look alike:
+#   metrics  (Session/Weekly/Context)  — gauges, carry the urgency ramp
+#   identity (model/plan/project/branch) — neutral text, never colored
+#
+# Urgency ramp: hue AND brightness escalate with utilization, so "everything is
+# fine" is visually quiet and only a real limit pulls the eye. All 256-color
+# (not truecolor) for maximum terminal coverage.
+#
+# Neutral scale: 4 explicit gray steps instead of SGR 2 (faint), which several
+# terminals silently drop — the hierarchy would collapse there.
 ANSI = {
-    'green':  '\033[38;5;82m',
-    'yellow': '\033[38;5;220m',
-    'orange': '\033[38;5;208m',
-    'red':    '\033[38;5;196m',
-    'dim':    '\033[2m',
+    'green':  '\033[38;5;71m',    # <50   calm sage
+    'yellow': '\033[38;5;179m',   # 50-74 amber
+    'orange': '\033[38;5;208m',   # 75-89 orange
+    'red':    '\033[38;5;203m',   # >=90  alarm
+    'value':  '\033[38;5;252m',   # brightest neutral — model name
+    'label':  '\033[38;5;245m',   # segment labels, plan, branch
+    'note':   '\033[38;5;243m',   # reset time, token detail
+    'track':  '\033[38;5;238m',   # empty gauge track, separators (graphic, not text)
+    'dim':    '\033[2m',          # kept for back-compat
     'bold':   '\033[1m',
     'reset':  '\033[0m',
 }
+
+# Gauge glyphs: heavy/light box-drawing rules join into one continuous track,
+# so filled vs empty differs by weight *and* hue. Lighter than █/░, which read
+# as a solid slab at statusline scale.
+BAR_FILLED = '━'
+BAR_EMPTY = '─'
+
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _visible_len(text: str) -> int:
+    """Printable width of a string, ignoring ANSI escape sequences."""
+    return len(_ANSI_RE.sub('', text))
 
 # Internal path constant used for scan_session_files (monkeypatched in tests)
 _PROJECTS_BASE: Path = Path.home() / '.claude' / 'projects'
@@ -262,7 +292,7 @@ def format_reset_label(resets_at_iso) -> str:
 def format_reset_compact(resets_at_iso) -> str:
     """Convert ISO 8601 UTC to compact local time label for color mode.
     Same day → '↺ HH:MM'
-    Different day → '↺ Jun 16'
+    Different day → '↺ Jun 16 HH:MM'
     Empty/None → ''
     """
     if not resets_at_iso:
@@ -273,10 +303,11 @@ def format_reset_compact(resets_at_iso) -> str:
         # Convert to device local timezone
         reset_local = reset_dt.astimezone()
         local_now = datetime.now().astimezone()
+        time_str = reset_local.strftime('%H:%M')
         if reset_local.date() == local_now.date():
-            return f'↺ {reset_local.strftime("%H:%M")}'
+            return f'↺ {time_str}'
         else:
-            return f'↺ {reset_local.strftime("%b")} {_fmt_day_no_pad(reset_local)} {reset_local.strftime("%H:%M")}'
+            return f'↺ {reset_local.strftime("%b")} {_fmt_day_no_pad(reset_local)} {time_str}'
     except Exception:
         return ''
 
@@ -308,40 +339,49 @@ def render_segment(
     line_len: int = 10,
     use_color: bool = True,
 ) -> str:
-    """Single segment: 'Session ────────── 54%  resets today 14:40'
-    label: DIM, line: colored, pct: colored+BOLD, note: DIM
-    >=90%: append ' ⚠' to note
-    use_color=False: ASCII bar [------....] style
+    """Single gauge: 'Session ━━━━━─────  51% ↺ 13:30'
+
+    Reading order is label → gauge → value → note (coarse to precise). The
+    percentage is right-aligned to 3 columns so the number block never shifts
+    width between refreshes — a 10s-refresh line that jitters is distracting.
+
+    label: neutral gray, bar: urgency color over dark track, pct: color+bold,
+    note: dimmer gray. >=90% inserts a ⚠ between value and note.
+    use_color=False: '[=====-----]' plain-ASCII gauge, no escapes at all.
     """
     warn = pct >= 90
+
+    # Any nonzero usage shows at least one filled cell — "some" must never
+    # render as "none".
+    if pct <= 0:
+        filled = 0
+    else:
+        filled = min(line_len, max(1, round(pct / 100.0 * line_len)))
+    empty = line_len - filled
+    pct_str = f'{int(pct):>3}%'
 
     if use_color:
         col = color_for(pct)
         reset = ANSI['reset']
-        dim = ANSI['dim']
         bold = ANSI['bold']
 
-        filled = round(pct / 100.0 * line_len)
-        bar = f'{col}{"█" * filled}{dim}{"░" * (line_len - filled)}{reset}'
-        pct_str = f'{col}{bold}{int(pct)}%{reset}'
-        label_str = f'{dim}{label}{reset}'
-        note_str = f'{dim}{note}{reset}' if note else ''
+        parts = [
+            f'{ANSI["label"]}{label}{reset}',
+            f'{col}{BAR_FILLED * filled}{ANSI["track"]}{BAR_EMPTY * empty}{reset}',
+            f'{col}{bold}{pct_str}{reset}',
+        ]
         if warn:
-            note_str = f'{col}{bold}⚠ {reset}{dim}{note}{reset}' if note else f'{col}{bold}⚠{reset}'
+            parts.append(f'{col}{bold}⚠{reset}')
+        if note:
+            parts.append(f'{ANSI["note"]}{note}{reset}')
     else:
-        filled = round(pct / 100.0 * line_len)
-        bar_chars = '-' * filled + '.' * (line_len - filled)
-        bar = f'[{bar_chars}]'
-        pct_str = f'{int(pct)}%'
-        label_str = label
-        note_str = note
+        parts = [label, f'[{"=" * filled}{"-" * empty}]', pct_str]
         if warn:
-            note_str = f'{note} ⚠' if note else '⚠'
+            parts.append('⚠')
+        if note:
+            parts.append(note)
 
-    parts = [label_str, bar, pct_str]
-    if note_str:
-        parts.append(' ' + note_str)
-    return ' '.join(parts[:3]) + (f'  {note_str}' if note_str else '')
+    return ' '.join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -551,49 +591,184 @@ def render_status_line(
             return (base_note + ' est.') if base_note else 'est.'
         return base_note
 
-    session_seg = render_segment(
-        'Session', five_hour['pct'], _note(five_hour),
-        line_len=10, use_color=use_color,
-    )
-    weekly_seg = render_segment(
-        'Weekly', seven_day['pct'], _note(seven_day),
-        line_len=10, use_color=use_color,
-    )
-
-    sep = f'  {ANSI["dim"]}│{ANSI["reset"]}  ' if use_color else '  │  '
-
-    # Right info (model + subscription + cwd + git branch)
-    right_parts = []
-    if model_name:
-        right_parts.append(_format_model_name(model_name))
-    if subscription:
-        right_parts.append(subscription.capitalize())
-    cwd_display = _format_cwd(cwd)
-    if cwd_display:
-        right_parts.append(cwd_display)
-    if git_branch:
-        right_parts.append(f'⎇ {git_branch}')
-    right_info = ' · '.join(right_parts) if right_parts else ''
-    if use_color and right_info:
-        right_info = f'{ANSI["dim"]}◆{ANSI["reset"]} ' + right_info
-
-    if term_width >= 110 and ctx_pct is not None:
-        ctx_label = 'Context'
-        ctx_note = ctx_detail if use_color else ''
-        ctx_seg = render_segment(
-            ctx_label, ctx_pct, ctx_note, line_len=10, use_color=use_color,
-        )
-        line = sep.join([session_seg, weekly_seg, ctx_seg])
-        if right_info:
-            line = line + sep + right_info
-    elif term_width >= 80:
-        line = sep.join([session_seg, weekly_seg])
-        if right_info:
-            line = line + sep + right_info
+    # Gauge length scales with available space. Shorter bars at narrow widths
+    # keep the metric group from crowding out project context. Below 60 columns
+    # (a three-way tmux split) the labels abbreviate too — at that size the
+    # gauge and the number are the message.
+    if term_width >= 140:
+        bar_len = 10
+    elif term_width >= 120:
+        bar_len = 8
+    elif term_width >= 90:
+        bar_len = 6
+    elif term_width >= 60:
+        bar_len = 5
     else:
-        line = sep.join([session_seg, weekly_seg])
+        bar_len = 4
+    # Floor for the gauge: 6 cells still reads as a proportion; below 90 columns
+    # 4 is all there is room for.
+    min_bar = 6 if term_width >= 90 else 4
+    session_label, weekly_label, ctx_label = (
+        ('Session', 'Weekly', 'Context') if term_width >= 60 else ('5h', '7d', 'Ctx')
+    )
 
-    return line
+    show_context = term_width >= 110 and ctx_pct is not None
+    show_identity = term_width >= 80
+
+    # Metrics are grouped by whitespace only; the single · divider is reserved
+    # for the boundary between the two information classes, so it reads as a
+    # class boundary instead of being repeated three times. Same glyph as the
+    # identity cluster's internal separators — one separator style, not two.
+    metric_sep = '   '
+    divider = f'  {ANSI["track"]}·{ANSI["reset"]}  ' if use_color else '  ·  '
+    cwd_display = _format_cwd(cwd)
+
+    def _assemble(bars: int, session_note: bool, weekly_note: bool,
+                  ctx_note: bool, cwd_mode: str, with_identity: bool = True) -> str:
+        segments = [
+            render_segment(session_label, five_hour['pct'],
+                           _note(five_hour) if session_note else '',
+                           line_len=bars, use_color=use_color),
+            render_segment(weekly_label, seven_day['pct'],
+                           _note(seven_day) if weekly_note else '',
+                           line_len=bars, use_color=use_color),
+        ]
+        if show_context:
+            detail = ctx_detail if (ctx_note and use_color) else ''
+            segments.append(render_segment(
+                ctx_label, ctx_pct, detail, line_len=bars, use_color=use_color,
+            ))
+        line = metric_sep.join(segments)
+        if not (show_identity and with_identity):
+            return line
+        identity = _render_identity(
+            model_name, subscription, cwd_display, git_branch, use_color, cwd_mode,
+        )
+        return (line + divider + identity) if identity else line
+
+    # Fit ladder — a wrapped statusline is the worst failure mode here, so the
+    # order in which things yield is explicit rather than emergent:
+    #   1. the full path shortens to the folder name
+    #   2. the gauges shrink — a bar is a redundant encoding of the number
+    #      beside it, so decoration yields before unique content
+    #   3. the path drops
+    #   4. context token count, then weekly reset date, then session reset time
+    # Model, plan and branch are never dropped: short, bounded, and the whole
+    # point of the cluster.
+    mid_bar = max(min_bar, bar_len - 2)
+    ladder = [
+        (bar_len, True, True, True, 'full'),
+        (bar_len, True, True, True, 'base'),
+        (mid_bar, True, True, True, 'base'),
+        (min_bar, True, True, True, 'base'),
+        (min_bar, True, True, True, 'none'),
+        (min_bar, True, True, False, 'none'),
+        (min_bar, True, False, False, 'none'),
+        (min_bar, False, False, False, 'none'),
+    ]
+    for cfg in ladder:
+        line = _assemble(*cfg)
+        if _visible_len(line) <= term_width:
+            return line
+
+    # Ladder exhausted (very narrow pane, or a very long branch name): the
+    # metrics alone own the line now. Shrink the identity cluster into whatever
+    # is left — a truncated branch, then model only, then nothing.
+    metrics = _assemble(min_bar, False, False, False, 'none', with_identity=False)
+    if not show_identity:
+        return metrics
+    budget = term_width - _visible_len(metrics) - _visible_len(divider)
+    identity = _fit_identity(model_name, subscription, git_branch, use_color, budget)
+    return (metrics + divider + identity) if identity else metrics
+
+
+def _basename(path: str) -> str:
+    """Last component of a display path ('~/dev/app' → 'app')."""
+    stripped = path.rstrip('/')
+    if not stripped:
+        return path
+    return stripped.rsplit('/', 1)[-1]
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Tail-truncate with an ellipsis. Returns '' if `limit` is too small."""
+    if limit <= 1:
+        return ''
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1] + '…'
+
+
+def _fit_identity(
+    model_name: Optional[str],
+    subscription: Optional[str],
+    git_branch: Optional[str],
+    use_color: bool,
+    budget: int,
+) -> str:
+    """Last-resort identity cluster for a line that is already at its limit.
+
+    Priority when there is almost no room: model → branch → plan. Each
+    candidate is tried whole; the first one that fits wins, so the result is
+    deterministic rather than a character-by-character squeeze.
+    """
+    if budget <= 0:
+        return ''
+    branch = f'⎇ {git_branch}' if git_branch else ''
+    short_branch = _truncate(branch, 12) if branch else ''
+    candidates = [
+        (model_name, subscription, branch),
+        (model_name, None, branch),
+        (model_name, None, short_branch),
+        (model_name, None, None),
+        (None, None, branch),
+    ]
+    for model, plan, br in candidates:
+        out = _render_identity(model, plan, None, None, use_color)
+        if br:
+            joiner = f' {ANSI["track"]}·{ANSI["reset"]} ' if use_color else ' · '
+            br_txt = f'{ANSI["label"]}{br}{ANSI["reset"]}' if use_color else br
+            out = (out + joiner + br_txt) if out else br_txt
+        if out and _visible_len(out) <= budget:
+            return out
+    return ''
+
+
+def _render_identity(
+    model_name: Optional[str],
+    subscription: Optional[str],
+    cwd_display: Optional[str],
+    git_branch: Optional[str],
+    use_color: bool,
+    cwd_mode: str = 'full',
+) -> str:
+    """Identity cluster: 'Sonnet 4.6 · Pro · ~/dev/app · ⎇ main'.
+
+    Never colored — this class answers "who and where", not "how much"; colour
+    on this line means utilization only. Hierarchy comes from the neutral
+    scale: the two anchors (model, project) sit at 'value', their qualifiers
+    (plan, branch) recede to 'label'.
+
+    `cwd_mode` is driven by the caller's fit ladder: 'full' | 'base' | 'none'.
+    """
+    items = []  # (text, ansi token)
+    if model_name:
+        items.append((_format_model_name(model_name), 'value'))
+    if subscription:
+        items.append((subscription.capitalize(), 'label'))
+    if cwd_display and cwd_mode != 'none':
+        path = cwd_display if cwd_mode == 'full' else _basename(cwd_display)
+        if path:
+            items.append((path, 'value'))
+    if git_branch:
+        items.append((f'⎇ {git_branch}', 'label'))
+
+    if not items:
+        return ''
+    if not use_color:
+        return ' · '.join(t for t, _ in items)
+    joiner = f' {ANSI["track"]}·{ANSI["reset"]} '
+    return joiner.join(f'{ANSI[tok]}{t}{ANSI["reset"]}' for t, tok in items)
 
 
 # ---------------------------------------------------------------------------
