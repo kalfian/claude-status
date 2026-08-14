@@ -140,6 +140,43 @@ class TestRenderStatusLine:
         assert 'Weekly' in out
         assert 'Context' in out
 
+    def test_git_branch_appended_to_right_info(self):
+        cs = import_module()
+        kwargs = dict(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=78.0,
+            ctx_detail='156K/200K',
+            model_name='claude-sonnet-4-6',
+            subscription='pro',
+            is_fallback=False,
+            use_color=False,
+            term_width=120,
+        )
+        with_branch = cs.render_status_line(git_branch='feature/x', **kwargs)
+        assert '⎇ feature/x' in with_branch
+        assert 'Pro · ⎇ feature/x' in with_branch
+        # Omitted by default
+        assert '⎇' not in cs.render_status_line(**kwargs)
+
+    def test_cwd_appended_before_git_branch(self):
+        cs = import_module()
+        kwargs = dict(
+            five_hour=self._make_result(54.0),
+            seven_day=self._make_result(6.0, '2026-06-16T10:00:00+00:00'),
+            ctx_pct=78.0,
+            ctx_detail='156K/200K',
+            model_name='claude-sonnet-4-6',
+            subscription='pro',
+            is_fallback=False,
+            use_color=False,
+            term_width=200,
+        )
+        out = cs.render_status_line(cwd='~/Developments/demo', git_branch='main', **kwargs)
+        assert 'Pro · ~/Developments/demo · ⎇ main' in out
+        # Omitted by default
+        assert '~/Developments/demo' not in cs.render_status_line(**kwargs)
+
     def test_medium_width_no_context(self):
         cs = import_module()
         five_hour = self._make_result(54.0)
@@ -325,3 +362,167 @@ class TestReadContextPct:
         # detail: '500/200K'
         assert '500' in detail
         assert '200K' in detail
+
+    def test_explicit_transcript_path_wins_over_newer_file(self, tmp_path, monkeypatch):
+        """transcript_path must be used even if another session file is newer."""
+        cs = import_module()
+        import claude_status as _cs
+        import json, os
+        monkeypatch.setattr(_cs, '_PROJECTS_BASE', tmp_path)
+
+        def _record(input_tokens):
+            return json.dumps({
+                "type": "assistant",
+                "message": {
+                    "id": "msg_x",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "output_tokens": 10,
+                    },
+                },
+                "timestamp": "2026-06-13T05:00:00.000Z",
+            }) + '\n'
+
+        mine = tmp_path / 'def2a8bb-672b-4ef9-97db-6c3f67fd1317'
+        mine.mkdir()
+        mine_file = mine / 'session.jsonl'
+        mine_file.write_text(_record(20000))
+
+        other = tmp_path / 'aaaaaaaa-672b-4ef9-97db-6c3f67fd1317'
+        other.mkdir()
+        other_file = other / 'session.jsonl'
+        other_file.write_text(_record(180000))
+        # Make the other session's file strictly newer
+        os.utime(other_file, (2_000_000_000, 2_000_000_000))
+
+        pct, _ = cs.read_context_pct(str(mine_file))
+        assert pct == pytest.approx(10.0)  # 20000 / 200000
+
+        # Without the path, the mtime fallback picks the wrong (newer) file
+        pct_fallback, _ = cs.read_context_pct()
+        assert pct_fallback == pytest.approx(90.0)
+
+    def test_missing_transcript_path_falls_back_to_mtime(self, tmp_path, monkeypatch):
+        cs = import_module()
+        import claude_status as _cs
+        import json
+        monkeypatch.setattr(_cs, '_PROJECTS_BASE', tmp_path)
+
+        uuid_dir = tmp_path / 'def2a8bb-672b-4ef9-97db-6c3f67fd1317'
+        uuid_dir.mkdir()
+        (uuid_dir / 'session.jsonl').write_text(json.dumps({
+            "type": "assistant",
+            "message": {
+                "id": "msg_y",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 100000,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "output_tokens": 10,
+                },
+            },
+        }) + '\n')
+
+        pct, _ = cs.read_context_pct(str(tmp_path / 'does-not-exist.jsonl'))
+        assert pct == pytest.approx(50.0)
+
+    def test_skips_sidechain_records(self, tmp_path, monkeypatch):
+        """Subagent (isSidechain) turns must not override main context usage."""
+        cs = import_module()
+        import claude_status as _cs
+        import json
+        monkeypatch.setattr(_cs, '_PROJECTS_BASE', tmp_path)
+
+        uuid_dir = tmp_path / 'def2a8bb-672b-4ef9-97db-6c3f67fd1317'
+        uuid_dir.mkdir()
+        jsonl_file = uuid_dir / 'session.jsonl'
+
+        def _record(input_tokens, sidechain):
+            obj = {
+                "type": "assistant",
+                "message": {
+                    "id": f"msg_{input_tokens}",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 0,
+                        "output_tokens": 10,
+                    },
+                },
+            }
+            if sidechain:
+                obj["isSidechain"] = True
+            return json.dumps(obj) + '\n'
+
+        # Main turn first, then a subagent turn with much smaller usage
+        jsonl_file.write_text(_record(120000, False) + _record(3000, True))
+
+        pct, detail = cs.read_context_pct(str(jsonl_file))
+        assert pct == pytest.approx(60.0)  # 120000 / 200000, not 3000
+        assert '120K' in detail
+
+
+# ---------------------------------------------------------------------------
+# get_git_branch
+# ---------------------------------------------------------------------------
+class TestGetGitBranch:
+    def test_returns_none_without_cwd(self):
+        cs = import_module()
+        assert cs.get_git_branch(None) is None
+        assert cs.get_git_branch('') is None
+
+    def test_returns_none_outside_repo(self, tmp_path):
+        cs = import_module()
+        assert cs.get_git_branch(str(tmp_path)) is None
+
+    def test_returns_branch_name(self, tmp_path):
+        cs = import_module()
+        import os, subprocess
+        env = dict(os.environ)
+        env.update({
+            'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_CONFIG_SYSTEM': os.devnull,
+            'GIT_AUTHOR_NAME': 'T', 'GIT_AUTHOR_EMAIL': 't@example.com',
+            'GIT_COMMITTER_NAME': 'T', 'GIT_COMMITTER_EMAIL': 't@example.com',
+        })
+
+        def _git(*args):
+            return subprocess.run(['git', '-C', str(tmp_path), *args],
+                                  capture_output=True, text=True, timeout=10,
+                                  env=env, check=True)
+
+        try:
+            _git('init', '-b', 'feature/x')
+            # rev-parse HEAD needs at least one commit (unborn HEAD fails)
+            _git('commit', '--allow-empty', '-m', 'init')
+        except Exception:
+            pytest.skip('git unavailable')
+        assert cs.get_git_branch(str(tmp_path)) == 'feature/x'
+
+
+# ---------------------------------------------------------------------------
+# _format_cwd
+# ---------------------------------------------------------------------------
+class TestFormatCwd:
+    def test_returns_none_for_falsy(self):
+        cs = import_module()
+        assert cs._format_cwd(None) is None
+        assert cs._format_cwd('') is None
+
+    def test_shortens_home_prefix(self, monkeypatch):
+        cs = import_module()
+        monkeypatch.setenv('HOME', '/Users/tester')
+        assert cs._format_cwd('/Users/tester/Developments/demo') == '~/Developments/demo'
+        assert cs._format_cwd('/Users/tester') == '~'
+
+    def test_keeps_path_outside_home(self, monkeypatch):
+        cs = import_module()
+        monkeypatch.setenv('HOME', '/Users/tester')
+        assert cs._format_cwd('/tmp/work') == '/tmp/work'
+        # Sibling dir sharing the prefix must not be mangled
+        assert cs._format_cwd('/Users/tester2/x') == '/Users/tester2/x'

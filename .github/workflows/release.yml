@@ -39,6 +39,16 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify plugin.json version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PLUGIN_VERSION=$(python3 -c "import json; print(json.load(open('.claude-plugin/plugin.json'))['version'])")
+          if [ "$TAG_VERSION" != "$PLUGIN_VERSION" ]; then
+            echo "::error::Tag v$TAG_VERSION does not match plugin.json version $PLUGIN_VERSION — bump plugin.json before tagging."
+            exit 1
+          fi
+          echo "Version check passed: plugin.json ($PLUGIN_VERSION) matches tag (v$TAG_VERSION)"
+
       - name: Check if pre-release
         id: prerelease
         run: |

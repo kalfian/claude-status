@@ -347,16 +347,25 @@ def render_segment(
 # ---------------------------------------------------------------------------
 # Module: Context reader
 # ---------------------------------------------------------------------------
-def read_context_pct() -> Tuple[Optional[float], Optional[str]]:
-    """Read most recently modified JSONL file from _PROJECTS_BASE/**/*.jsonl.
-    Find last assistant record, compute context %.
-    Returns (pct: float, detail: str) or (None, None).
+def _latest_transcript(transcript_path: Optional[str] = None) -> Optional[Path]:
+    """Resolve the transcript JSONL to read.
+
+    Prefers the explicit `transcript_path` sent by Claude Code on stdin. Falls
+    back to the most recently modified JSONL under _PROJECTS_BASE (used for
+    --dev/--debug or when stdin carries no payload).
     """
+    if transcript_path:
+        try:
+            p = Path(transcript_path)
+            if p.exists():
+                return p
+        except OSError:
+            pass
+
     base = _PROJECTS_BASE
     if not base.exists():
-        return None, None
+        return None
 
-    # Find all JSONL files and sort by mtime descending
     jsonl_files = []
     for p in base.rglob('*.jsonl'):
         try:
@@ -365,10 +374,24 @@ def read_context_pct() -> Tuple[Optional[float], Optional[str]]:
             pass
 
     if not jsonl_files:
-        return None, None
+        return None
 
     jsonl_files.sort(key=lambda x: x[0], reverse=True)
-    most_recent = jsonl_files[0][1]
+    return jsonl_files[0][1]
+
+
+def read_context_pct(transcript_path: Optional[str] = None) -> Tuple[Optional[float], Optional[str]]:
+    """Read the session transcript JSONL, find last assistant record, compute context %.
+
+    `transcript_path` is the path Claude Code sends on stdin; when omitted the
+    most recently modified JSONL under _PROJECTS_BASE is used instead.
+    Sidechain (subagent/Task) records are skipped — their usage is not the main
+    conversation's context.
+    Returns (pct: float, detail: str) or (None, None).
+    """
+    most_recent = _latest_transcript(transcript_path)
+    if most_recent is None:
+        return None, None
 
     try:
         last_record = None
@@ -379,6 +402,8 @@ def read_context_pct() -> Tuple[Optional[float], Optional[str]]:
                     continue
                 try:
                     obj = json.loads(line)
+                    if obj.get('isSidechain'):
+                        continue
                     if obj.get('type') == 'assistant':
                         msg = obj.get('message', {})
                         usage = msg.get('usage', {})
@@ -409,6 +434,8 @@ def read_context_pct() -> Tuple[Optional[float], Optional[str]]:
                     continue
                 try:
                     obj = json.loads(line)
+                    if obj.get('isSidechain'):
+                        continue
                     if obj.get('type') == 'assistant':
                         msg = obj.get('message', {})
                         if msg.get('usage') == last_record:
@@ -434,8 +461,47 @@ def read_context_pct() -> Tuple[Optional[float], Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Module: Git branch
+# ---------------------------------------------------------------------------
+def get_git_branch(cwd: Optional[str]) -> Optional[str]:
+    """Current git branch for `cwd`, or None if unavailable/detached HEAD."""
+    if not cwd:
+        return None
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+            cwd=cwd, capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode != 0:
+            return None
+        branch = (result.stdout or '').strip()
+        if not branch or branch == 'HEAD':
+            return None
+        return branch
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Module: Full line renderer
 # ---------------------------------------------------------------------------
+def _format_cwd(cwd: Optional[str]) -> Optional[str]:
+    """Compact display form of a working directory: home prefix → '~'."""
+    if not cwd:
+        return None
+    try:
+        home = os.path.expanduser('~')
+        path = str(cwd)
+        if home and home != os.sep:
+            if path == home:
+                return '~'
+            if path.startswith(home + os.sep):
+                return '~' + path[len(home):]
+        return path
+    except Exception:
+        return None
+
+
 def _format_model_name(model_name: str) -> str:
     """'claude-sonnet-4-6' → 'Sonnet 4.6'"""
     # Strip leading 'claude-'
@@ -471,6 +537,8 @@ def render_status_line(
     is_fallback: bool,
     use_color: bool,
     term_width: int,
+    git_branch: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> str:
     """Full line adaptive layout."""
 
@@ -494,12 +562,17 @@ def render_status_line(
 
     sep = f'  {ANSI["dim"]}│{ANSI["reset"]}  ' if use_color else '  │  '
 
-    # Right info (model + subscription)
+    # Right info (model + subscription + cwd + git branch)
     right_parts = []
     if model_name:
         right_parts.append(_format_model_name(model_name))
     if subscription:
         right_parts.append(subscription.capitalize())
+    cwd_display = _format_cwd(cwd)
+    if cwd_display:
+        right_parts.append(cwd_display)
+    if git_branch:
+        right_parts.append(f'⎇ {git_branch}')
     right_info = ' · '.join(right_parts) if right_parts else ''
     if use_color and right_info:
         right_info = f'{ANSI["dim"]}◆{ANSI["reset"]} ' + right_info
@@ -1140,7 +1213,7 @@ def main():
             used_tokens = int(total * used_pct / 100)
             ctx_detail = f'{used_tokens // 1000}K/{total // 1000}K'
     if ctx_pct is None:
-        ctx_pct, ctx_detail = read_context_pct()
+        ctx_pct, ctx_detail = read_context_pct(native.get('transcript_path') if native else None)
 
     _log(f'  context     : {ctx_pct:.1f}% ({ctx_detail})' if ctx_pct is not None else '  context     : (not available)')
 
@@ -1151,31 +1224,38 @@ def main():
         model_name = m.get('id') or m.get('display_name') or None
     if not model_name:
         try:
-            base = _PROJECTS_BASE
-            if base.exists():
-                jsonl_files = sorted(
-                    base.rglob('*.jsonl'),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
-                )
-                if jsonl_files:
-                    with open(jsonl_files[0], 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
+            transcript = _latest_transcript(native.get('transcript_path') if native else None)
+            if transcript is not None:
+                with open(transcript, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                            if obj.get('isSidechain'):
                                 continue
-                            try:
-                                obj = json.loads(line)
-                                if obj.get('type') == 'assistant':
-                                    m = obj.get('message', {}).get('model')
-                                    if m and m != '<synthetic>':
-                                        model_name = m
-                            except json.JSONDecodeError:
-                                pass
+                            if obj.get('type') == 'assistant':
+                                m = obj.get('message', {}).get('model')
+                                if m and m != '<synthetic>':
+                                    model_name = m
+                        except json.JSONDecodeError:
+                            pass
         except Exception:
             pass
 
     _log(f'  model       : {model_name or "(not detected)"}')
+
+    # Git branch of the session's working directory
+    if native:
+        git_cwd = native.get('cwd') or (native.get('workspace') or {}).get('current_dir') or os.getcwd()
+    else:
+        git_cwd = os.getcwd()
+    git_branch = get_git_branch(git_cwd)
+    cwd_display = _format_cwd(git_cwd)
+
+    _log(f'  cwd         : {cwd_display or "(none)"}')
+    _log(f'  git_branch  : {git_branch or "(none)"}')
 
     term_width = shutil.get_terminal_size((80, 24)).columns
     _log(f'  term_width  : {term_width}  is_fallback={is_fallback}')
@@ -1208,6 +1288,8 @@ def main():
             'ctx_detail': ctx_detail,
             'model': model_name,
             'subscription': subscription,
+            'cwd': cwd_display,
+            'git_branch': git_branch,
             'is_fallback': is_fallback,
         }
         print(json.dumps(output))
@@ -1222,6 +1304,8 @@ def main():
             is_fallback=is_fallback,
             use_color=use_color,
             term_width=term_width,
+            git_branch=git_branch,
+            cwd=cwd_display,
         )
         print(line)
 
